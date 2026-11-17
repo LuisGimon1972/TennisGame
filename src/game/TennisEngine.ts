@@ -1,0 +1,614 @@
+import { CANVAS_WIDTH, CANVAS_HEIGHT, COURT } from './tennisConstants';
+import { Ball } from './classes/Ball';
+import { Player } from './classes/Player';
+import { Court } from './classes/Court';
+import { SpriteAtlas } from './classes/SpriteAtlas';
+import { soundManager } from './classes/SoundManager';
+
+const MAX_BALL_SPEED = 6.5;
+
+interface BounceMark {
+  x: number;
+  y: number;
+  alpha: number;
+}
+
+export class TennisEngine {
+  public player: Player;
+  public ai: Player;
+  public ball: Ball;
+  public atlas: SpriteAtlas;
+  public isGameOver = false;
+  public message = 'PRONTO PARA JOGAR! (SAQUE)';
+  public isDeuce = false;
+  public advantageServer: 'player' | 'ai' | null = null;
+  public bounceMarks: BounceMark[] = [];
+  public isGameStarted = false;
+
+  private difficulty: 'easy' | 'hard' = 'hard';
+  private gameMode: 'pvp' | 'pve' = 'pve';
+
+  private powerCharge = 0;
+  private isCharging = false;
+  private chargeStartTime = 0;
+  private maxChargeTime = 1000;
+
+  private p2PowerCharge = 0;
+  private p2IsCharging = false;
+  private p2ChargeStartTime = 0;
+
+  private lastHitTime = 0;
+  private hitCooldownMs = 350;
+  private aiTargetX = 0;
+  private aiTargetY = 0;
+  private aiNextDecisionAt = 0;
+  private aiWasReceiving = false;
+  private aiApproachNet = false;
+
+  constructor() {
+    this.player = new Player(COURT.x + COURT.width / 2 - 22, COURT.y + COURT.height - 80);
+    this.ai = new Player(COURT.x + COURT.width / 2 - 22, COURT.y + 40);
+    this.ball = new Ball(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+
+    this.atlas = new SpriteAtlas('images/AtlasTennis1.png', 2, 4);
+    this.resetPoint(true);
+  }
+
+  public setDifficulty(level: 'easy' | 'hard'): void {
+    this.difficulty = level;
+    this.gameMode = 'pve';
+    this.message = level === 'hard' ? 'Modo Difícil Ativado' : 'Modo Fácil Ativado';
+  }
+
+  public setGameMode(mode: 'pve' | 'pvp'): void {
+    this.gameMode = mode;
+    this.message = mode === 'pvp' ? 'Modo Humano vs Humano Ativado' : 'Modo Jogador vs IA Ativado';
+  }
+
+  public startPowerCharge(): void {
+    if (this.isGameOver || !this.isGameStarted) return;
+    this.isCharging = true;
+    this.chargeStartTime = performance.now();
+    this.powerCharge = 0;
+  }
+
+  public releasePowerCharge(): void {
+    if (!this.isCharging) return;
+    const elapsed = performance.now() - this.chargeStartTime;
+    this.powerCharge = Math.min(elapsed / this.maxChargeTime, 1.0);
+    this.isCharging = false;
+  }
+
+  public startP2PowerCharge(): void {
+    if (this.isGameOver || !this.isGameStarted || this.gameMode !== 'pvp') return;
+    this.p2IsCharging = true;
+    this.p2ChargeStartTime = performance.now();
+    this.p2PowerCharge = 0;
+  }
+
+  public releaseP2PowerCharge(): void {
+    if (!this.p2IsCharging) return;
+    const elapsed = performance.now() - this.p2ChargeStartTime;
+    this.p2PowerCharge = Math.min(elapsed / this.maxChargeTime, 1.0);
+    this.p2IsCharging = false;
+  }
+
+  public resetPoint(servingToPlayer: boolean = true): void {
+    this.ball.reset(servingToPlayer);
+    this.aiNextDecisionAt = 0;
+    this.aiWasReceiving = false;
+    this.aiApproachNet = false;
+    this.isCharging = false;
+    this.powerCharge = 0;
+    this.p2IsCharging = false;
+    this.p2PowerCharge = 0;
+    this.lastHitTime = 0;
+    this.bounceMarks = [];
+    this.player.resetPosition(COURT.x + COURT.width / 2 - 22, COURT.y + COURT.height - 80);
+    this.ai.resetPosition(COURT.x + COURT.width / 2 - 22, COURT.y + 40);
+  }
+
+  public restartMatch(): void {
+    this.player.score = 0;
+    this.ai.score = 0;
+    this.player.sets = 0;
+    this.ai.sets = 0;
+    this.isGameOver = false;
+    this.isDeuce = false;
+    this.advantageServer = null;
+    this.bounceMarks = [];
+    this.message = 'NOVA PARTIDA INICIADA!';
+    this.resetPoint(true);
+  }
+
+  public getScoreDisplay(score: number, isAi: boolean): string {
+    if (this.isGameOver) return 'FIM';
+
+    const pAdv = this.advantageServer === 'player';
+    const aAdv = this.advantageServer === 'ai';
+
+    if (this.player.score >= 3 && this.ai.score >= 3) {
+      if (this.isDeuce) return '40 (DEUCE)';
+      if (isAi && aAdv) return 'VANTAGEM';
+      if (!isAi && pAdv) return 'VANTAGEM';
+      return '40';
+    }
+
+    const mapPoints = ['0', '15', '30', '40'];
+    return mapPoints[score] || '40';
+  }
+
+  private handlePointScored(scoredByPlayer: boolean) {
+    soundManager.playScore();
+
+    if (scoredByPlayer) {
+      if (this.ai.score >= 3 && this.player.score >= 3) {
+        if (!this.isDeuce && this.advantageServer === 'ai') {
+          this.advantageServer = null;
+          this.isDeuce = true;
+          this.message = 'DEUCE!';
+          this.resetPoint(false);
+          return;
+        } else if (this.isDeuce || this.advantageServer === null) {
+          if (this.advantageServer === 'player') {
+            this.winGame(true);
+            return;
+          } else {
+            this.advantageServer = 'player';
+            this.isDeuce = false;
+            this.message = 'VANTAGEM PARA O JOGADOR 1!';
+            this.resetPoint(false);
+            return;
+          }
+        }
+      }
+
+      this.player.score++;
+      if (this.player.score >= 4 && this.player.score - this.ai.score >= 2) {
+        this.winGame(true);
+      } else {
+        this.message = 'Ponto do Jogador 1!';
+        this.resetPoint(false);
+      }
+    } else {
+      if (this.player.score >= 3 && this.ai.score >= 3) {
+        if (!this.isDeuce && this.advantageServer === 'player') {
+          this.advantageServer = null;
+          this.isDeuce = true;
+          this.message = 'DEUCE!';
+          this.resetPoint(true);
+          return;
+        } else if (this.isDeuce || this.advantageServer === null) {
+          if (this.advantageServer === 'ai') {
+            this.winGame(false);
+            return;
+          } else {
+            this.advantageServer = 'ai';
+            this.isDeuce = false;
+            this.message =
+              this.gameMode === 'pvp' ? 'VANTAGEM PARA O JOGADOR 2!' : 'VANTAGEM PARA O OPONENTE!';
+            this.resetPoint(true);
+            return;
+          }
+        }
+      }
+
+      this.ai.score++;
+      if (this.ai.score >= 4 && this.ai.score - this.player.score >= 2) {
+        this.winGame(false);
+      } else {
+        this.message = this.gameMode === 'pvp' ? 'Ponto do Jogador 2!' : 'Ponto do Oponente!';
+        this.resetPoint(true);
+      }
+    }
+  }
+
+  private winGame(playerWon: boolean) {
+    if (playerWon) {
+      this.player.sets++;
+      this.message = 'JOGO E SET PARA O JOGADOR 1! 🏆';
+    } else {
+      this.ai.sets++;
+      this.message =
+        this.gameMode === 'pvp' ? 'JOGO E SET PARA O JOGADOR 2! 🏆' : 'JOGO E SET PARA O OPONENTE!';
+    }
+
+    this.player.score = 0;
+    this.ai.score = 0;
+    this.isDeuce = false;
+    this.advantageServer = null;
+
+    if (this.player.sets >= 3 || this.ai.sets >= 3) {
+      this.isGameOver = true;
+      this.message = playerWon
+        ? 'PARTIDA VENCIDA PELO JOGADOR 1!'
+        : this.gameMode === 'pvp'
+          ? 'PARTIDA VENCIDA PELO JOGADOR 2!'
+          : 'PARTIDA VENCIDA PELO OPONENTE!';
+    } else {
+      this.resetPoint(playerWon);
+    }
+  }
+
+  public update(playerDx: number, playerDy: number, p2Dx: number = 0, p2Dy: number = 0): void {
+    if (this.isGameOver || !this.isGameStarted) return;
+
+    if (this.isCharging) {
+      const elapsed = performance.now() - this.chargeStartTime;
+      this.powerCharge = Math.min(elapsed / this.maxChargeTime, 1.0);
+    }
+
+    if (this.gameMode === 'pvp' && this.p2IsCharging) {
+      const elapsed = performance.now() - this.p2ChargeStartTime;
+      this.p2PowerCharge = Math.min(elapsed / this.maxChargeTime, 1.0);
+    }
+
+    this.player.move(playerDx, playerDy);
+
+    if (this.gameMode === 'pvp') {
+      this.ai.move(p2Dx, p2Dy, true);
+      const netY = COURT.y + COURT.height / 2;
+      const minY = COURT.y + 8;
+      const maxY = Math.max(minY, netY - this.ai.height - 24);
+      this.ai.x = this.clamp(this.ai.x, COURT.x, COURT.x + COURT.width - this.ai.width);
+      this.ai.y = this.clamp(this.ai.y, minY, maxY);
+    } else {
+      this.updateAI();
+    }
+
+    this.limitBallSpeed();
+
+    const previousX = this.ball.x;
+    const previousY = this.ball.y;
+    this.ball.update();
+
+    const netY = COURT.y + COURT.height / 2;
+    const currentTime = performance.now();
+
+    if ((previousY > netY && this.ball.y <= netY) || (previousY < netY && this.ball.y >= netY)) {
+      this.bounceMarks.push({
+        x: this.ball.x,
+        y: this.ball.y,
+        alpha: 1.0,
+      });
+
+      if (this.bounceMarks.length > 12) {
+        this.bounceMarks.shift();
+      }
+    }
+
+    for (let i = this.bounceMarks.length - 1; i >= 0; i--) {
+      const mark = this.bounceMarks[i];
+      if (mark) {
+        mark.alpha -= 0.0025;
+        if (mark.alpha <= 0) {
+          this.bounceMarks.splice(i, 1);
+        }
+      }
+    }
+
+    const playerFace = this.player.y;
+    const aiFace = this.ai.y + this.ai.height;
+    const radius = this.ball.radius;
+    const canHit = currentTime - this.lastHitTime > this.hitCooldownMs;
+
+    if (canHit) {
+      // Colisão do Jogador 1 (A bola tem de estar a descer: vy > 0)
+      if (
+        this.ball.vy > 0 &&
+        playerFace >= netY &&
+        previousY + radius <= playerFace &&
+        this.ball.y + radius >= playerFace
+      ) {
+        const hitX = this.crossingX(previousX, previousY, playerFace - radius);
+        if (hitX + radius >= this.player.x && hitX - radius <= this.player.x + this.player.width) {
+          const paddleCenter = this.player.x + this.player.width / 2;
+          const offset = this.clamp((hitX - paddleCenter) / (this.player.width / 2), -1, 1);
+          const powerMultiplier = 1.0 + this.powerCharge * 1.5;
+
+          this.ball.x = hitX;
+          this.ball.y = playerFace - radius - 2;
+
+          const aimX = COURT.x + COURT.width * (0.5 + offset * 0.42);
+          const contactY = COURT.y + 8 + this.ai.height + radius;
+          const vyUp = -Math.max(3.0, Math.min(3.6 * powerMultiplier, 4.6));
+          const travelFrames = Math.max(1, (this.ball.y - contactY) / Math.abs(vyUp));
+
+          this.ball.vx = this.clamp((aimX - hitX) / travelFrames, -2.6, 2.6);
+          this.ball.vy = vyUp;
+          this.ball.lastHitByPlayer = true;
+
+          this.lastHitTime = currentTime;
+          this.powerCharge = 0;
+          soundManager.playHit();
+        }
+      } else if (
+        this.ball.vy < 0 &&
+        aiFace <= netY &&
+        previousY - radius >= aiFace &&
+        this.ball.y - radius <= aiFace
+      ) {
+        const hitX = this.crossingX(previousX, previousY, aiFace + radius);
+        if (hitX + radius >= this.ai.x && hitX - radius <= this.ai.x + this.ai.width) {
+          this.ball.x = hitX;
+          this.ball.y = aiFace + radius + 2;
+
+          if (this.gameMode === 'pvp') {
+            const paddleCenter = this.ai.x + this.ai.width / 2;
+            const offset = this.clamp((hitX - paddleCenter) / (this.ai.width / 2), -1, 1);
+            const p2PowerMultiplier = 1.0 + this.p2PowerCharge * 1.5;
+
+            const aimX = COURT.x + COURT.width * (0.5 - offset * 0.42);
+            const targetY = this.player.y - radius;
+            const vyDown = Math.max(3.0, Math.min(3.6 * p2PowerMultiplier, 4.6));
+            const travelFrames = Math.max(1, (targetY - (aiFace + radius)) / vyDown);
+
+            this.ball.vx = this.clamp((aimX - hitX) / travelFrames, -2.6, 2.6);
+            this.ball.vy = vyDown;
+            this.p2PowerCharge = 0;
+          } else {
+            if (this.difficulty === 'easy') {
+              this.ball.vx = (Math.random() - 0.5) * 3.5;
+              this.ball.vy = Math.max(3.8, Math.abs(this.ball.vy) * 1.0);
+            } else {
+              const playerCenter = this.player.x + this.player.width / 2;
+              const aimX =
+                COURT.x + COURT.width * (playerCenter < COURT.x + COURT.width / 2 ? 0.78 : 0.22);
+              const targetY = this.player.y - radius;
+              const travelFrames = Math.max(1, (targetY - (aiFace + radius)) / 4.5);
+              this.ball.vx = this.clamp((aimX - hitX) / travelFrames, -3.5, 3.5);
+              this.ball.vy = Math.max(2.5, Math.abs(this.ball.vy) * 1.02);
+            }
+          }
+
+          this.ball.lastHitByPlayer = false;
+          this.lastHitTime = currentTime;
+          soundManager.playHit();
+        }
+      }
+    }
+
+    this.limitBallSpeed();
+
+    if (this.ball.y < COURT.y - radius) {
+      if (this.ball.lastHitByPlayer) {
+        this.handlePointScored(true);
+      } else {
+        this.handlePointScored(false);
+      }
+    } else if (this.ball.y > COURT.y + COURT.height + radius) {
+      if (this.ball.lastHitByPlayer) {
+        this.handlePointScored(false);
+      } else {
+        this.handlePointScored(true);
+      }
+    } else if (this.ball.x < COURT.x || this.ball.x > COURT.x + COURT.width) {
+      if (this.ball.lastHitByPlayer) {
+        this.handlePointScored(false);
+      } else {
+        this.handlePointScored(true);
+      }
+    }
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  private updateAI(): void {
+    const now = performance.now();
+    const netY = COURT.y + COURT.height / 2;
+    const minY = COURT.y + 8;
+    const maxY = Math.max(minY, netY - this.ai.height - 24);
+    const baselineY = this.clamp(COURT.y + 40, minY, maxY);
+    const receiving = this.ball.vy < 0;
+    const reactionTime = this.difficulty === 'hard' ? 150 : 500;
+    const errorMargin = this.difficulty === 'hard' ? 25 : 120;
+    const moveSpeed = this.difficulty === 'hard' ? 1.0 : 0.65;
+
+    if (receiving && !this.aiWasReceiving) {
+      this.aiApproachNet = false;
+      this.aiNextDecisionAt = 0;
+    }
+    this.aiWasReceiving = receiving;
+
+    if (now >= this.aiNextDecisionAt) {
+      this.aiNextDecisionAt = now + reactionTime;
+      this.aiTargetY = baselineY;
+
+      const courtCenter = COURT.x + COURT.width / 2;
+      let targetCenterX = courtCenter;
+
+      if (receiving) {
+        const contactY = this.aiTargetY + this.ai.height + this.ball.radius;
+        const framesToContact = (contactY - this.ball.y) / this.ball.vy;
+        if (framesToContact >= 0) {
+          const humanError = (Math.random() - 0.5) * errorMargin;
+          targetCenterX = this.ball.x + this.ball.vx * Math.min(framesToContact, 120) + humanError;
+        } else {
+          targetCenterX = this.ai.x + this.ai.width / 2;
+        }
+      } else {
+        targetCenterX = courtCenter;
+      }
+
+      this.aiTargetX = this.clamp(
+        targetCenterX - this.ai.width / 2,
+        COURT.x,
+        COURT.x + COURT.width - this.ai.width,
+      );
+    }
+
+    const dx = this.aiTargetX - this.ai.x;
+    const dy = this.aiTargetY - this.ai.y;
+    const deadZone = 3;
+    let moveX = Math.abs(dx) > deadZone ? Math.sign(dx) : 0;
+    let moveY = Math.abs(dy) > deadZone ? Math.sign(dy) : 0;
+    const magnitude = Math.hypot(moveX, moveY);
+    if (magnitude > 1) {
+      moveX /= magnitude;
+      moveY /= magnitude;
+    }
+
+    this.ai.move(moveX * moveSpeed, moveY * moveSpeed, true);
+    this.ai.x = this.clamp(this.ai.x, COURT.x, COURT.x + COURT.width - this.ai.width);
+    this.ai.y = this.clamp(this.ai.y, minY, maxY);
+  }
+
+  private crossingX(previousX: number, previousY: number, contactY: number): number {
+    const distanceY = this.ball.y - previousY;
+    if (Math.abs(distanceY) < 0.000001) return this.ball.x;
+    const fraction = this.clamp((contactY - previousY) / distanceY, 0, 1);
+    return previousX + (this.ball.x - previousX) * fraction;
+  }
+
+  private limitBallSpeed(): void {
+    const speed = Math.hypot(this.ball.vx, this.ball.vy);
+    const currentMaxSpeed = this.difficulty === 'easy' ? 4.5 : MAX_BALL_SPEED;
+    if (speed > currentMaxSpeed) {
+      const factor = currentMaxSpeed / speed;
+      this.ball.vx *= factor;
+      this.ball.vy *= factor;
+    }
+  }
+
+  public render(ctx: CanvasRenderingContext2D): void {
+    ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    Court.render(ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    this.bounceMarks.forEach((mark) => {
+      ctx.fillStyle = `rgba(255, 255, 255, ${mark.alpha * 0.7})`;
+      ctx.strokeStyle = `rgba(15, 23, 42, ${mark.alpha * 0.5})`;
+      ctx.lineWidth = 1.5;
+
+      ctx.beginPath();
+      ctx.arc(mark.x, mark.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+
+    let aiRow = 0;
+    let playerRow = 0;
+
+    if (this.isGameStarted) {
+      const isBallAtServe = Math.abs(this.ball.vx) < 0.1 && Math.abs(this.ball.vy) < 0.1;
+      const aiIsServing = isBallAtServe && this.ball.y < CANVAS_HEIGHT / 2;
+      const playerIsServing = isBallAtServe && this.ball.y >= CANVAS_HEIGHT / 2;
+
+      if (aiIsServing) {
+        aiRow = 1;
+        playerRow = 0;
+      } else if (playerIsServing) {
+        aiRow = 0;
+        playerRow = 1;
+      } else {
+        aiRow = Math.floor(Math.abs(this.ai.x) % 2) + 2;
+        playerRow = Math.floor(Math.abs(this.player.x) % 2) + 2;
+      }
+    } else {
+      aiRow = 0;
+      playerRow = 0;
+    }
+
+    if (this.atlas.isLoaded) {
+      this.atlas.draw(ctx, 0, aiRow, this.ai.x, this.ai.y, this.ai.width, this.ai.height);
+      this.atlas.draw(
+        ctx,
+        1,
+        playerRow,
+        this.player.x,
+        this.player.y,
+        this.player.width,
+        this.player.height,
+      );
+    } else {
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillRect(this.ai.x, this.ai.y, this.ai.width, this.ai.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(this.ai.x, this.ai.y + this.ai.height - 3, this.ai.width, 6);
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(this.player.x, this.player.y, this.player.width, this.player.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(this.player.x, this.player.y - 3, this.player.width, 6);
+    }
+
+    if (this.isGameStarted) {
+      if ((this.ball as any).history && Array.isArray((this.ball as any).history)) {
+        (this.ball as any).history.forEach((pos: { x: number; y: number }, index: number) => {
+          const alpha = (index + 1) / ((this.ball as any).history.length * 1.5);
+          ctx.fillStyle = `rgba(250, 204, 21, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, this.ball.radius * 0.7, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+
+      ctx.fillStyle = '#facc15';
+      ctx.beginPath();
+      ctx.arc(this.ball.x, this.ball.y, this.ball.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.beginPath();
+      ctx.arc(this.ball.x, this.ball.y + 10, this.ball.radius * 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (this.isCharging && this.powerCharge > 0) {
+      const barWidth = 40;
+      const barHeight = 6;
+      const barX = this.player.x + this.player.width / 2 - barWidth / 2;
+      const barY = this.player.y - 12;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(barX, barY, barWidth, barHeight);
+
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(barX, barY, barWidth * this.powerCharge, barHeight);
+
+      ctx.strokeStyle = '#ffffff';
+      ctx.strokeRect(barX, barY, barWidth, barHeight);
+    }
+
+    if (this.gameMode === 'pvp' && this.p2IsCharging && this.p2PowerCharge > 0) {
+      const barWidth = 40;
+      const barHeight = 6;
+      const barX = this.ai.x + this.ai.width / 2 - barWidth / 2;
+      const barY = this.ai.y + this.ai.height + 6;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(barX, barY, barWidth, barHeight);
+
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(barX, barY, barWidth * this.p2PowerCharge, barHeight);
+
+      ctx.strokeStyle = '#ffffff';
+      ctx.strokeRect(barX, barY, barWidth, barHeight);
+    }
+
+    const boardHeight = 28;
+    const boardY = COURT.y - boardHeight - 8;
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(COURT.x, boardY, COURT.width, boardHeight);
+
+    ctx.font = 'bold 12px sans-serif';
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f87171';
+    ctx.fillText(
+      `${this.gameMode === 'pvp' ? 'Jogador 2' : 'Oponente'}: ${this.getScoreDisplay(this.ai.score, true)} (Games: ${this.ai.sets})`,
+      COURT.x + 15,
+      boardY + 18,
+    );
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillText(
+      `Jogador 1: ${this.getScoreDisplay(this.player.score, false)} (Games: ${this.player.sets})`,
+      COURT.x + COURT.width - 15,
+      boardY + 18,
+    );
+  }
+}
