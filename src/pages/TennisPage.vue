@@ -104,7 +104,7 @@
       </div>
 
       <div
-        style="margin-top: -15px"
+        style="margin-top: 15px"
         class="relative-position shadow-20 rounded-borders overflow-hidden canvas-wrapper"
       >
         <canvas
