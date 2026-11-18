@@ -14,6 +14,7 @@ interface BounceMark {
   x: number;
   y: number;
   alpha: number;
+  type: 'player-point' | 'ai-point' | 'neutral';
 }
 
 export class TennisEngine {
@@ -40,7 +41,6 @@ export class TennisEngine {
   private p2IsCharging = false;
   private p2ChargeStartTime = 0;
 
-  // Estado da arbitragem independente de Ball.reset() e de flags externas.
   private rallyId = 0;
   private resolvedRallyId = -1;
   private lastStriker: Competitor | null = null;
@@ -118,7 +118,6 @@ export class TennisEngine {
     this.p2IsCharging = false;
     this.p2PowerCharge = 0;
     this.lastHitTime = 0;
-    this.bounceMarks = [];
     this.player.resetPosition(COURT.x + COURT.width / 2 - 22, COURT.y + COURT.height - 80);
     this.ai.resetPosition(COURT.x + COURT.width / 2 - 22, COURT.y + 40);
   }
@@ -154,8 +153,13 @@ export class TennisEngine {
     return mapPoints[score] || '40';
   }
 
-  /** Única entrada da arbitragem: um resultado por identificador de jogada. */
-  private awardPoint(winner: Competitor, reason: PointReason, rallyId: number): void {
+  private awardPoint(
+    winner: Competitor,
+    reason: PointReason,
+    rallyId: number,
+    landingX?: number,
+    landingY?: number,
+  ): void {
     if (
       this.isGameOver ||
       !this.isGameStarted ||
@@ -164,11 +168,10 @@ export class TennisEngine {
     )
       return;
 
-    // Bloqueia antes de atualizar o placar e antes de resetar a bola.
     this.resolvedRallyId = rallyId;
     this.lastPoint = { rallyId, winner, reason };
+    this.registerLandingMark(landingX, landingY, winner === 'player' ? 'player-point' : 'ai-point');
     this.handlePointScored(winner === 'player');
-    // O áudio não pode impedir a atualização ou o reinício da jogada.
     try {
       soundManager.playScore();
     } catch (error) {
@@ -177,7 +180,6 @@ export class TennisEngine {
   }
 
   private handlePointScored(scoredByPlayer: boolean): void {
-    // Pontos numéricos são a fonte única de verdade, inclusive após deuce.
     if (scoredByPlayer) this.player.score += 1;
     else this.ai.score += 1;
 
@@ -214,18 +216,16 @@ export class TennisEngine {
     this.resetPoint(!scoredByPlayer);
   }
 
-  /**
-   * Regras arcade já usadas pelo motor: ultrapassar o fundo adversário ganha
-   * o ponto; sair pela lateral perde o ponto para quem fez a última batida.
-   * Sem altura/quiques reais não é possível arbitrar regras completas de tênis.
-   */
-  private judgeBoundary(previousX: number, previousY: number, rallyId: number): boolean {
+  private judgeBoundary(
+    previousX: number,
+    previousY: number,
+    rallyId: number,
+  ): { x: number; y: number; reason: PointReason } | null {
     const { x, y, radius } = this.ball;
     if (![previousX, previousY, x, y, radius].every(Number.isFinite) || radius < 0) {
-      // Estado inválido nunca gera um ponto para qualquer participante.
       this.message = 'Jogada reiniciada: posição inválida da bola.';
       this.resetPoint(true);
-      return true;
+      return null;
     }
 
     const left = COURT.x - radius;
@@ -234,43 +234,61 @@ export class TennisEngine {
     const bottom = COURT.y + COURT.height + radius;
     const dx = x - previousX;
     const dy = y - previousY;
-    const exits: { time: number; reason: PointReason }[] = [];
+    const exits: { time: number; x: number; y: number; reason: PointReason }[] = [];
+
     const addExit = (
       outside: boolean,
-      delta: number,
-      start: number,
-      edge: number,
+      deltaX: number,
+      deltaY: number,
+      startX: number,
+      startY: number,
+      edgeX: number | null,
+      edgeY: number | null,
       reason: PointReason,
     ) => {
       if (!outside) return;
-      const time = delta === 0 ? 0 : this.clamp((edge - start) / delta, 0, 1);
-      exits.push({ time, reason });
+      const fraction =
+        edgeY !== null
+          ? this.crossingFraction(startY, y, edgeY, deltaY)
+          : this.crossingFraction(startX, x, edgeX as number, deltaX);
+
+      exits.push({
+        time: fraction,
+        x: startX + (x - startX) * fraction,
+        y: startY + (y - startY) * fraction,
+        reason,
+      });
     };
 
-    // Laterais têm prioridade apenas num empate exato de canto.
-    addExit(x < left, dx, previousX, left, 'side-out');
-    addExit(x > right, dx, previousX, right, 'side-out');
-    addExit(y < top, dy, previousY, top, 'upper-baseline');
-    addExit(y > bottom, dy, previousY, bottom, 'lower-baseline');
+    addExit(x < left, dx, dy, previousX, previousY, left, null, 'side-out');
+    addExit(x > right, dx, dy, previousX, previousY, right, null, 'side-out');
+    addExit(y < top, dx, dy, previousX, previousY, null, top, 'upper-baseline');
+    addExit(y > bottom, dx, dy, previousX, previousY, null, bottom, 'lower-baseline');
     exits.sort((a, b) => a.time - b.time);
     const exit = exits[0];
-    if (!exit) return false;
+    if (!exit) return null;
 
     let winner: Competitor;
-    if (exit.reason === 'upper-baseline') winner = 'player';
-    else if (exit.reason === 'lower-baseline') winner = 'ai';
-    else {
+    if (exit.reason === 'upper-baseline') {
+      winner = exit.y < COURT.y ? 'player' : 'ai';
+    } else if (exit.reason === 'lower-baseline') {
+      winner = 'ai';
+    } else {
       if (this.lastStriker === null) {
-        // Não adivinha pelo lado do campo nem por uma flag possivelmente antiga.
         this.message = 'Jogada reiniciada: saída lateral sem autor identificado.';
         this.resetPoint(true);
-        return true;
+        return null;
       }
       winner = this.lastStriker === 'player' ? 'ai' : 'player';
     }
 
-    this.awardPoint(winner, exit.reason, rallyId);
-    return true;
+    this.awardPoint(winner, exit.reason, rallyId, exit.x, exit.y);
+    return { x: exit.x, y: exit.y, reason: exit.reason };
+  }
+
+  private crossingFraction(start: number, end: number, edge: number, delta: number): number {
+    if (Math.abs(delta) < 0.000001) return 0;
+    return this.clamp((edge - start) / delta, 0, 1);
   }
 
   private winGame(playerWon: boolean) {
@@ -331,48 +349,31 @@ export class TennisEngine {
     const previousX = this.ball.x;
     const previousY = this.ball.y;
     const currentRallyId = this.rallyId;
-    // Identifica o lançamento inicial pela direção real, não pelo argumento de reset.
-    // vy < 0: saiu do jogador inferior; vy > 0: saiu do oponente superior.
+
     if (this.lastStriker === null && this.ball.vy !== 0) {
       this.lastStriker = this.ball.vy < 0 ? 'player' : 'ai';
       this.ball.lastHitByPlayer = this.lastStriker === 'player';
     }
     this.ball.update();
-    // Arbitra antes de qualquer nova colisão: uma bola fora não pode ser salva.
+
     if (this.judgeBoundary(previousX, previousY, currentRallyId)) return;
 
-    const netY = COURT.y + COURT.height / 2;
     const currentTime = performance.now();
-
-    if ((previousY > netY && this.ball.y <= netY) || (previousY < netY && this.ball.y >= netY)) {
-      this.bounceMarks.push({
-        x: this.ball.x,
-        y: this.ball.y,
-        alpha: 1.0,
-      });
-
-      if (this.bounceMarks.length > 12) {
-        this.bounceMarks.shift();
-      }
-    }
 
     for (let i = this.bounceMarks.length - 1; i >= 0; i--) {
       const mark = this.bounceMarks[i];
-      if (mark) {
-        mark.alpha -= 0.0025;
-        if (mark.alpha <= 0) {
-          this.bounceMarks.splice(i, 1);
-        }
-      }
+      if (!mark) continue;
+      mark.alpha -= 0.002;
+      if (mark.alpha <= 0) this.bounceMarks.splice(i, 1);
     }
 
+    const netY = COURT.y + COURT.height / 2;
     const playerFace = this.player.y;
     const aiFace = this.ai.y + this.ai.height;
     const radius = this.ball.radius;
     const canHit = currentTime - this.lastHitTime > this.hitCooldownMs;
 
     if (canHit) {
-      // Colisão do Jogador 1 (A bola tem de estar a descer: vy > 0)
       if (
         this.ball.vy > 0 &&
         playerFace >= netY &&
@@ -450,6 +451,25 @@ export class TennisEngine {
     }
 
     this.limitBallSpeed();
+  }
+
+  private registerLandingMark(
+    landingX?: number,
+    landingY?: number,
+    type: 'player-point' | 'ai-point' | 'neutral' = 'neutral',
+  ): void {
+    if (landingX === undefined || landingY === undefined) return;
+
+    const netY = COURT.y + COURT.height / 2;
+    // Bloqueia marcas geradas exatamente na zona central da rede (margem de 40px)
+    if (Math.abs(landingY - netY) < 40) {
+      return;
+    }
+
+    this.bounceMarks.push({ x: landingX, y: landingY, alpha: 1.0, type });
+    if (this.bounceMarks.length > 8) {
+      this.bounceMarks.shift();
+    }
   }
 
   private clamp(value: number, min: number, max: number): number {
@@ -537,14 +557,23 @@ export class TennisEngine {
     ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
     Court.render(ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
 
+    const netY = COURT.y + COURT.height / 2;
+
+    // Renderiza as marcas de queda em ambas as metades, excluindo rigorosamente a faixa da rede (±40px)
     this.bounceMarks.forEach((mark) => {
-      ctx.fillStyle = `rgba(255, 255, 255, ${mark.alpha * 0.7})`;
-      ctx.strokeStyle = `rgba(15, 23, 42, ${mark.alpha * 0.5})`;
-      ctx.lineWidth = 1.5;
+      if (Math.abs(mark.y - netY) < 40) return;
+
+      const color = mark.type === 'player-point' ? 'rgba(34, 197, 94' : 'rgba(239, 68, 68';
 
       ctx.beginPath();
-      ctx.arc(mark.x, mark.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = `${color}, ${mark.alpha * 0.9})`;
+      ctx.arc(mark.x, mark.y, 10 * mark.alpha, 0, Math.PI * 2);
       ctx.fill();
+
+      ctx.beginPath();
+      ctx.strokeStyle = `rgba(255, 255, 255, ${mark.alpha})`;
+      ctx.lineWidth = 2.5;
+      ctx.arc(mark.x, mark.y, 13 * mark.alpha, 0, Math.PI * 2);
       ctx.stroke();
     });
 
@@ -595,13 +624,16 @@ export class TennisEngine {
     }
 
     if (this.isGameStarted) {
+      // Desenha o rasto da bola em ambas as metades, excluindo a zona da rede (±40px)
       if ((this.ball as any).history && Array.isArray((this.ball as any).history)) {
         (this.ball as any).history.forEach((pos: { x: number; y: number }, index: number) => {
-          const alpha = (index + 1) / ((this.ball as any).history.length * 1.5);
-          ctx.fillStyle = `rgba(250, 204, 21, ${alpha})`;
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, this.ball.radius * 0.7, 0, Math.PI * 2);
-          ctx.fill();
+          if (Math.abs(pos.y - netY) >= 40) {
+            const alpha = (index + 1) / ((this.ball as any).history.length * 1.5);
+            ctx.fillStyle = `rgba(250, 204, 21, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, this.ball.radius * 0.7, 0, Math.PI * 2);
+            ctx.fill();
+          }
         });
       }
 
