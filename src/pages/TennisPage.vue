@@ -1,7 +1,10 @@
 <template>
-  <q-page class="flex flex-center bg-grey-10 text-white q-pa-md">
-    <div class="column items-center">
-      <div class="row items-center justify-between q-mb-sm" style="width: 440px; margin-top: -20px">
+  <q-page class="flex flex-center bg-grey-10 text-white q-pa-md game-container-page">
+    <div class="column items-center game-wrapper">
+      <div
+        class="row items-center justify-between q-mb-sm control-row"
+        style="width: 440px; margin-top: -20px"
+      >
         <div class="text-subtitle2 text-grey-4">Modo de jogo:</div>
         <q-toggle
           v-model="isPvPMode"
@@ -17,7 +20,7 @@
 
       <div
         v-if="!isPvPMode"
-        class="row items-center justify-between q-mb-sm"
+        class="row items-center justify-between q-mb-sm control-row"
         style="width: 440px; margin-top: -20px"
       >
         <div class="text-subtitle2 text-grey-4">Dificuldade da IA:</div>
@@ -35,7 +38,7 @@
 
       <div
         v-if="isPvPMode"
-        class="row q-mb-sm q-gutter-xs justify-center items-center"
+        class="row q-mb-sm q-gutter-xs justify-center items-center p2-controls-box"
         style="
           width: 440px;
           background: rgba(255, 255, 255, 0.05);
@@ -100,7 +103,7 @@
 
       <div
         style="margin-top: -5px"
-        class="relative-position shadow-20 rounded-borders overflow-hidden"
+        class="relative-position shadow-20 rounded-borders overflow-hidden canvas-wrapper"
       >
         <canvas
           ref="canvasRef"
@@ -110,7 +113,10 @@
         ></canvas>
       </div>
 
-      <div class="row items-center justify-center q-mt-sm" style="min-height: 40px; width: 440px">
+      <div
+        class="row items-center justify-center q-mt-sm message-row"
+        style="min-height: 40px; width: 440px"
+      >
         <div
           class="text-subtitle1 text-yellow-500 text-center q-mr-md"
           style="text-transform: none"
@@ -136,11 +142,12 @@
         />
       </div>
 
-      <div class="row q-mt-md justify-center items-center" style="width: 440px">
+      <div class="row q-mt-md justify-center items-center p1-controls-row" style="width: 440px">
         <span v-if="isPvPMode" class="text-xs text-blue-400 q-mr-md">P1:</span>
 
         <!-- Bloco de Direções em Cruz -->
         <div
+          class="dpad-grid"
           style="
             display: grid;
             grid-template-columns: repeat(3, 50px);
@@ -202,7 +209,7 @@
           </div>
         </div>
 
-        <div class="q-ml-lg">
+        <div class="q-ml-lg action-buttons-group">
           <q-btn
             style="margin-left: -25px"
             color="red-5"
@@ -437,13 +444,6 @@ onMounted(() => {
   engine.ball.vy = 0;
   engine.message = 'Clique em "Iniciar jogo"';
 
-  const exitGame = () => {
-    window.close();
-    setTimeout(() => {
-      router.push('/');
-    }, 100);
-  };
-
   const canvas = canvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -485,11 +485,52 @@ onUnmounted(() => {
   cancelAnimationFrame(animationFrameId);
 });
 </script>
+
 <style scoped>
 .action-btn {
   font-size: 11px;
   padding: 6px 10px;
   border-radius: 6px;
   font-weight: bold;
+}
+
+/* Responsividade para Tablets e Phones (telas abaixo de 768px) */
+@media (max-width: 768px) {
+  .game-container-page {
+    padding: 4px !important;
+  }
+
+  .control-row,
+  .p2-controls-box,
+  .message-row,
+  .p1-controls-row {
+    width: 100% !important;
+    max-width: 360px !important;
+    box-sizing: border-box;
+  }
+
+  .canvas-wrapper canvas {
+    max-width: 100% !important;
+    height: auto !important;
+    object-fit: contain;
+  }
+
+  .p1-controls-row {
+    flex-direction: column !important;
+    gap: 12px;
+  }
+
+  .action-buttons-group {
+    margin-left: 0 !important;
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .action-buttons-group .q-btn {
+    margin-left: 0 !important;
+  }
 }
 </style>
