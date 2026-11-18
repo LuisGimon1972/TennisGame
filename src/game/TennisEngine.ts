@@ -7,6 +7,9 @@ import { soundManager } from './classes/SoundManager';
 
 const MAX_BALL_SPEED = 6.5;
 
+type Competitor = 'player' | 'ai';
+type PointReason = 'upper-baseline' | 'lower-baseline' | 'side-out';
+
 interface BounceMark {
   x: number;
   y: number;
@@ -36,6 +39,16 @@ export class TennisEngine {
   private p2PowerCharge = 0;
   private p2IsCharging = false;
   private p2ChargeStartTime = 0;
+
+  // Estado da arbitragem independente de Ball.reset() e de flags externas.
+  private rallyId = 0;
+  private resolvedRallyId = -1;
+  private lastStriker: Competitor | null = null;
+  public lastPoint: {
+    rallyId: number;
+    winner: Competitor;
+    reason: PointReason;
+  } | null = null;
 
   private lastHitTime = 0;
   private hitCooldownMs = 350;
@@ -94,6 +107,8 @@ export class TennisEngine {
   }
 
   public resetPoint(servingToPlayer: boolean = true): void {
+    this.rallyId += 1;
+    this.lastStriker = null;
     this.ball.reset(servingToPlayer);
     this.aiNextDecisionAt = 0;
     this.aiWasReceiving = false;
@@ -117,6 +132,7 @@ export class TennisEngine {
     this.isDeuce = false;
     this.advantageServer = null;
     this.bounceMarks = [];
+    this.lastPoint = null;
     this.message = 'NOVA PARTIDA INICIADA!';
     this.resetPoint(true);
   }
@@ -138,69 +154,123 @@ export class TennisEngine {
     return mapPoints[score] || '40';
   }
 
-  private handlePointScored(scoredByPlayer: boolean) {
-    soundManager.playScore();
+  /** Única entrada da arbitragem: um resultado por identificador de jogada. */
+  private awardPoint(winner: Competitor, reason: PointReason, rallyId: number): void {
+    if (
+      this.isGameOver ||
+      !this.isGameStarted ||
+      rallyId !== this.rallyId ||
+      this.resolvedRallyId === rallyId
+    )
+      return;
 
-    if (scoredByPlayer) {
-      if (this.ai.score >= 3 && this.player.score >= 3) {
-        if (!this.isDeuce && this.advantageServer === 'ai') {
-          this.advantageServer = null;
-          this.isDeuce = true;
-          this.message = 'DEUCE!';
-          this.resetPoint(false);
-          return;
-        } else if (this.isDeuce || this.advantageServer === null) {
-          if (this.advantageServer === 'player') {
-            this.winGame(true);
-            return;
-          } else {
-            this.advantageServer = 'player';
-            this.isDeuce = false;
-            this.message = 'VANTAGEM PARA O JOGADOR 1!';
-            this.resetPoint(false);
-            return;
-          }
-        }
-      }
-
-      this.player.score++;
-      if (this.player.score >= 4 && this.player.score - this.ai.score >= 2) {
-        this.winGame(true);
-      } else {
-        this.message = 'Ponto do Jogador 1!';
-        this.resetPoint(false);
-      }
-    } else {
-      if (this.player.score >= 3 && this.ai.score >= 3) {
-        if (!this.isDeuce && this.advantageServer === 'player') {
-          this.advantageServer = null;
-          this.isDeuce = true;
-          this.message = 'DEUCE!';
-          this.resetPoint(true);
-          return;
-        } else if (this.isDeuce || this.advantageServer === null) {
-          if (this.advantageServer === 'ai') {
-            this.winGame(false);
-            return;
-          } else {
-            this.advantageServer = 'ai';
-            this.isDeuce = false;
-            this.message =
-              this.gameMode === 'pvp' ? 'VANTAGEM PARA O JOGADOR 2!' : 'VANTAGEM PARA O OPONENTE!';
-            this.resetPoint(true);
-            return;
-          }
-        }
-      }
-
-      this.ai.score++;
-      if (this.ai.score >= 4 && this.ai.score - this.player.score >= 2) {
-        this.winGame(false);
-      } else {
-        this.message = this.gameMode === 'pvp' ? 'Ponto do Jogador 2!' : 'Ponto do Oponente!';
-        this.resetPoint(true);
-      }
+    // Bloqueia antes de atualizar o placar e antes de resetar a bola.
+    this.resolvedRallyId = rallyId;
+    this.lastPoint = { rallyId, winner, reason };
+    this.handlePointScored(winner === 'player');
+    // O áudio não pode impedir a atualização ou o reinício da jogada.
+    try {
+      soundManager.playScore();
+    } catch (error) {
+      console.warn('Não foi possível reproduzir o som do ponto.', error);
     }
+  }
+
+  private handlePointScored(scoredByPlayer: boolean): void {
+    // Pontos numéricos são a fonte única de verdade, inclusive após deuce.
+    if (scoredByPlayer) this.player.score += 1;
+    else this.ai.score += 1;
+
+    const playerScore = this.player.score;
+    const aiScore = this.ai.score;
+    const difference = playerScore - aiScore;
+
+    if (Math.max(playerScore, aiScore) >= 4 && Math.abs(difference) >= 2) {
+      this.winGame(difference > 0);
+      return;
+    }
+
+    this.isDeuce = playerScore >= 3 && aiScore >= 3 && difference === 0;
+    this.advantageServer =
+      playerScore >= 3 && aiScore >= 3 && difference !== 0
+        ? difference > 0
+          ? 'player'
+          : 'ai'
+        : null;
+
+    if (this.isDeuce) this.message = 'DEUCE!';
+    else if (this.advantageServer === 'player') this.message = 'VANTAGEM PARA O JOGADOR 1!';
+    else if (this.advantageServer === 'ai') {
+      this.message =
+        this.gameMode === 'pvp' ? 'VANTAGEM PARA O JOGADOR 2!' : 'VANTAGEM PARA O OPONENTE!';
+    } else {
+      this.message = scoredByPlayer
+        ? 'Ponto do Jogador 1!'
+        : this.gameMode === 'pvp'
+          ? 'Ponto do Jogador 2!'
+          : 'Ponto do Oponente!';
+    }
+
+    this.resetPoint(!scoredByPlayer);
+  }
+
+  /**
+   * Regras arcade já usadas pelo motor: ultrapassar o fundo adversário ganha
+   * o ponto; sair pela lateral perde o ponto para quem fez a última batida.
+   * Sem altura/quiques reais não é possível arbitrar regras completas de tênis.
+   */
+  private judgeBoundary(previousX: number, previousY: number, rallyId: number): boolean {
+    const { x, y, radius } = this.ball;
+    if (![previousX, previousY, x, y, radius].every(Number.isFinite) || radius < 0) {
+      // Estado inválido nunca gera um ponto para qualquer participante.
+      this.message = 'Jogada reiniciada: posição inválida da bola.';
+      this.resetPoint(true);
+      return true;
+    }
+
+    const left = COURT.x - radius;
+    const right = COURT.x + COURT.width + radius;
+    const top = COURT.y - radius;
+    const bottom = COURT.y + COURT.height + radius;
+    const dx = x - previousX;
+    const dy = y - previousY;
+    const exits: { time: number; reason: PointReason }[] = [];
+    const addExit = (
+      outside: boolean,
+      delta: number,
+      start: number,
+      edge: number,
+      reason: PointReason,
+    ) => {
+      if (!outside) return;
+      const time = delta === 0 ? 0 : this.clamp((edge - start) / delta, 0, 1);
+      exits.push({ time, reason });
+    };
+
+    // Laterais têm prioridade apenas num empate exato de canto.
+    addExit(x < left, dx, previousX, left, 'side-out');
+    addExit(x > right, dx, previousX, right, 'side-out');
+    addExit(y < top, dy, previousY, top, 'upper-baseline');
+    addExit(y > bottom, dy, previousY, bottom, 'lower-baseline');
+    exits.sort((a, b) => a.time - b.time);
+    const exit = exits[0];
+    if (!exit) return false;
+
+    let winner: Competitor;
+    if (exit.reason === 'upper-baseline') winner = 'player';
+    else if (exit.reason === 'lower-baseline') winner = 'ai';
+    else {
+      if (this.lastStriker === null) {
+        // Não adivinha pelo lado do campo nem por uma flag possivelmente antiga.
+        this.message = 'Jogada reiniciada: saída lateral sem autor identificado.';
+        this.resetPoint(true);
+        return true;
+      }
+      winner = this.lastStriker === 'player' ? 'ai' : 'player';
+    }
+
+    this.awardPoint(winner, exit.reason, rallyId);
+    return true;
   }
 
   private winGame(playerWon: boolean) {
@@ -260,7 +330,16 @@ export class TennisEngine {
 
     const previousX = this.ball.x;
     const previousY = this.ball.y;
+    const currentRallyId = this.rallyId;
+    // Identifica o lançamento inicial pela direção real, não pelo argumento de reset.
+    // vy < 0: saiu do jogador inferior; vy > 0: saiu do oponente superior.
+    if (this.lastStriker === null && this.ball.vy !== 0) {
+      this.lastStriker = this.ball.vy < 0 ? 'player' : 'ai';
+      this.ball.lastHitByPlayer = this.lastStriker === 'player';
+    }
     this.ball.update();
+    // Arbitra antes de qualquer nova colisão: uma bola fora não pode ser salva.
+    if (this.judgeBoundary(previousX, previousY, currentRallyId)) return;
 
     const netY = COURT.y + COURT.height / 2;
     const currentTime = performance.now();
@@ -317,6 +396,7 @@ export class TennisEngine {
           this.ball.vx = this.clamp((aimX - hitX) / travelFrames, -2.6, 2.6);
           this.ball.vy = vyUp;
           this.ball.lastHitByPlayer = true;
+          this.lastStriker = 'player';
 
           this.lastHitTime = currentTime;
           this.powerCharge = 0;
@@ -362,6 +442,7 @@ export class TennisEngine {
           }
 
           this.ball.lastHitByPlayer = false;
+          this.lastStriker = 'ai';
           this.lastHitTime = currentTime;
           soundManager.playHit();
         }
@@ -369,26 +450,6 @@ export class TennisEngine {
     }
 
     this.limitBallSpeed();
-
-    if (this.ball.y < COURT.y - radius) {
-      if (this.ball.lastHitByPlayer) {
-        this.handlePointScored(true);
-      } else {
-        this.handlePointScored(false);
-      }
-    } else if (this.ball.y > COURT.y + COURT.height + radius) {
-      if (this.ball.lastHitByPlayer) {
-        this.handlePointScored(false);
-      } else {
-        this.handlePointScored(true);
-      }
-    } else if (this.ball.x < COURT.x || this.ball.x > COURT.x + COURT.width) {
-      if (this.ball.lastHitByPlayer) {
-        this.handlePointScored(false);
-      } else {
-        this.handlePointScored(true);
-      }
-    }
   }
 
   private clamp(value: number, min: number, max: number): number {
