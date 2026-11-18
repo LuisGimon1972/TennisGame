@@ -1,18 +1,20 @@
 <template>
   <q-page class="flex flex-center bg-grey-10 text-white q-pa-md game-container-page">
     <div class="column items-center game-wrapper">
+      <h6 style="margin-top: -10px">Tennis Evolution Game</h6>
       <div
         class="row items-center justify-between q-mb-sm control-row"
         style="width: 440px; margin-top: -20px"
       >
-        <div class="text-subtitle2 text-grey-4">Modo de jogo:</div>
+        <div style="margin-top: -30px" class="text-subtitle2 text-grey-4">Modo de jogo:</div>
         <q-toggle
+          style="margin-top: -30px"
           v-model="isPvPMode"
           :disable="gameStarted"
           color="purple"
           checked-icon="people"
           unchecked-icon="smart_toy"
-          :label="isPvPMode ? 'Humano vs humano' : 'Jogador vs IA'"
+          :label="isPvPMode ? 'Humano vs Humano' : 'Jogador vs IA'"
           left-label
           @update:model-value="updateGameMode"
         />
@@ -21,7 +23,7 @@
       <div
         v-if="!isPvPMode"
         class="row items-center justify-between q-mb-sm control-row"
-        style="width: 440px; margin-top: -20px"
+        style="width: 440px; margin-top: -25px"
       >
         <div class="text-subtitle2 text-grey-4">Dificuldade da IA:</div>
         <q-toggle
@@ -102,7 +104,7 @@
       </div>
 
       <div
-        style="margin-top: -5px"
+        style="margin-top: -15px"
         class="relative-position shadow-20 rounded-borders overflow-hidden canvas-wrapper"
       >
         <canvas

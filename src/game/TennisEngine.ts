@@ -143,7 +143,7 @@ export class TennisEngine {
     const aAdv = this.advantageServer === 'ai';
 
     if (this.player.score >= 3 && this.ai.score >= 3) {
-      if (this.isDeuce) return '40 (DEUCE)';
+      if (this.isDeuce) return '40';
       if (isAi && aAdv) return 'VANTAGEM';
       if (!isAi && pAdv) return 'VANTAGEM';
       return '40';
@@ -151,6 +151,26 @@ export class TennisEngine {
 
     const mapPoints = ['0', '15', '30', '40'];
     return mapPoints[score] || '40';
+  }
+
+  /** Decide texto, cor e conteúdo da faixa de anúncios (DEUCE, VANTAGEM, PONTO...). */
+  public getAnnouncement(): { text: string; color: string } {
+    if (!this.isGameStarted) return { text: 'CLIQUE EM "INICIAR JOGO"', color: '#fbbf24' };
+    if (this.isGameOver) return { text: this.message, color: '#fbbf24' };
+    if (this.isDeuce) return { text: 'DEUCE!', color: '#fbbf24' };
+    if (this.advantageServer === 'player') {
+      return { text: 'VANTAGEM — JOGADOR 1', color: '#38bdf8' };
+    }
+    if (this.advantageServer === 'ai') {
+      return {
+        text: this.gameMode === 'pvp' ? 'VANTAGEM — JOGADOR 2' : 'VANTAGEM — OPONENTE',
+        color: '#f87171',
+      };
+    }
+    if (this.message.toUpperCase().includes('SET') || this.message.includes('PARTIDA')) {
+      return { text: this.message, color: '#4ade80' };
+    }
+    return { text: this.message, color: '#e2e8f0' };
   }
 
   private awardPoint(
@@ -461,7 +481,6 @@ export class TennisEngine {
     if (landingX === undefined || landingY === undefined) return;
 
     const netY = COURT.y + COURT.height / 2;
-    // Bloqueia marcas geradas exatamente na zona central da rede (margem de 40px)
     if (Math.abs(landingY - netY) < 40) {
       return;
     }
@@ -559,7 +578,6 @@ export class TennisEngine {
 
     const netY = COURT.y + COURT.height / 2;
 
-    // Renderiza as marcas de queda em ambas as metades, excluindo rigorosamente a faixa da rede (±40px)
     this.bounceMarks.forEach((mark) => {
       if (Math.abs(mark.y - netY) < 40) return;
 
@@ -624,7 +642,6 @@ export class TennisEngine {
     }
 
     if (this.isGameStarted) {
-      // Desenha o rasto da bola em ambas as metades, excluindo a zona da rede (±40px)
       if ((this.ball as any).history && Array.isArray((this.ball as any).history)) {
         (this.ball as any).history.forEach((pos: { x: number; y: number }, index: number) => {
           if (Math.abs(pos.y - netY) >= 40) {
@@ -680,28 +697,60 @@ export class TennisEngine {
       ctx.strokeRect(barX, barY, barWidth, barHeight);
     }
 
-    const boardHeight = 28;
-    const boardY = COURT.y - boardHeight - 8;
+    // --- PLACAR (referência de posição: fica logo abaixo da faixa) ---
+    const scoreBoardHeight = 28;
+    const scoreBoardY = COURT.y - scoreBoardHeight - 6;
+
+    // --- FAIXA DE ANÚNCIOS (DEUCE, VANTAGEM, PONTO, SET...) ---
+    const msgBoardHeight = 22;
+    const msgBoardY = scoreBoardY - msgBoardHeight - 6;
+
+    const ann = this.getAnnouncement();
 
     ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-    ctx.fillRect(COURT.x, boardY, COURT.width, boardHeight);
+    ctx.fillRect(COURT.x, msgBoardY, COURT.width, msgBoardHeight);
 
-    ctx.font = 'bold 12px sans-serif';
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(COURT.x, msgBoardY + msgBoardHeight);
+    ctx.lineTo(COURT.x + COURT.width, msgBoardY + msgBoardHeight);
+    ctx.stroke();
+
+    let fontSize = 12;
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    const maxWidth = COURT.width - 24;
+    while (ctx.measureText(ann.text).width > maxWidth && fontSize > 8) {
+      fontSize -= 1;
+      ctx.font = `bold ${fontSize}px sans-serif`;
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ann.color;
+    ctx.fillText(ann.text, COURT.x + COURT.width / 2, msgBoardY + msgBoardHeight / 2);
+    ctx.textBaseline = 'alphabetic';
+
+    // --- PLACAR ---
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(COURT.x, scoreBoardY, COURT.width, scoreBoardHeight);
+
+    ctx.font = 'bold 11px sans-serif';
 
     ctx.textAlign = 'left';
     ctx.fillStyle = '#f87171';
     ctx.fillText(
       `${this.gameMode === 'pvp' ? 'Jogador 2' : 'Oponente'}: ${this.getScoreDisplay(this.ai.score, true)} (Games: ${this.ai.sets})`,
-      COURT.x + 15,
-      boardY + 18,
+      COURT.x + 10,
+      scoreBoardY + 18,
     );
 
     ctx.textAlign = 'right';
     ctx.fillStyle = '#38bdf8';
     ctx.fillText(
       `Jogador 1: ${this.getScoreDisplay(this.player.score, false)} (Games: ${this.player.sets})`,
-      COURT.x + COURT.width - 15,
-      boardY + 18,
+      COURT.x + COURT.width - 10,
+      scoreBoardY + 18,
     );
   }
 }
